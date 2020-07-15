@@ -6,7 +6,7 @@ namespace Lunar.Native.Structures
     [StructLayout(LayoutKind.Explicit, Size = 88)]
     internal readonly struct SymbolInfo
     {
-        [FieldOffset(0x00)]
+        [FieldOffset(0x0)]
         private readonly int SizeOfStruct;
 
         [FieldOffset(0x38)]
@@ -15,13 +15,13 @@ namespace Lunar.Native.Structures
         [FieldOffset(0x50)]
         private readonly int MaxNameLen;
 
-        internal SymbolInfo(int maxNameLen)
+        internal SymbolInfo(int nameBufferSize)
         {
             SizeOfStruct = Unsafe.SizeOf<SymbolInfo>();
 
             Address = 0;
 
-            MaxNameLen = maxNameLen;
+            MaxNameLen = nameBufferSize;
         }
     }
 }

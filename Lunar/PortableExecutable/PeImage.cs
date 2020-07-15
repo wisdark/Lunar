@@ -1,5 +1,5 @@
 ﻿using System;
-using System.Collections.Immutable;
+using System.IO;
 using System.Linq;
 using System.Reflection.PortableExecutable;
 using Lunar.PortableExecutable.DataDirectories;
@@ -8,64 +8,60 @@ namespace Lunar.PortableExecutable
 {
     internal sealed class PeImage
     {
-        internal Lazy<BaseRelocationDirectory> BaseRelocationDirectory { get; }
+        internal BaseRelocationDirectory BaseRelocationDirectory { get; }
 
-        internal CodeViewDebugDirectoryData CodeViewDebugDirectoryData { get; }
+        internal DelayImportDirectory DelayImportDirectory { get; }
 
-        internal Lazy<DelayImportDirectory> DelayImportDirectory { get; }
+        internal ExportDirectory ExportDirectory { get; }
 
-        internal Lazy<ExportDirectory> ExportDirectory { get; }
-        
-        internal Lazy<ImportDirectory> ImportDirectory { get; }
-        
-        internal Lazy<LoadConfigDirectory> LoadConfigDirectory { get; }
+        internal PEHeaders Headers { get; }
 
-        internal PEHeaders PeHeaders { get; }
+        internal ImportDirectory ImportDirectory { get; }
 
-        internal Lazy<TlsDirectory> TlsDirectory { get; }
+        internal LoadConfigDirectory LoadConfigDirectory { get; }
 
-        internal PeImage(ReadOnlyMemory<byte> peBytes)
+        internal CodeViewDebugDirectoryData PdbData { get; }
+
+        internal TlsDirectory TlsDirectory { get; }
+
+        internal PeImage(Memory<byte> imageBytes)
         {
-            using var peReader = new PEReader(peBytes.ToArray().ToImmutableArray());
-            
-            ValidatePeImage(peReader.PEHeaders);
-            
-            BaseRelocationDirectory = new Lazy<BaseRelocationDirectory>(() => new BaseRelocationDirectory(peBytes, PeHeaders));
+            using var peReader = new PEReader(new MemoryStream(imageBytes.ToArray()));
 
-            CodeViewDebugDirectoryData = ReadCodeViewDebugDirectoryData(peReader);
-            
-            DelayImportDirectory = new Lazy<DelayImportDirectory>(() => new DelayImportDirectory(peBytes, PeHeaders));
-            
-            ExportDirectory = new Lazy<ExportDirectory>(() => new ExportDirectory(peBytes, PeHeaders));
-            
-            ImportDirectory = new Lazy<ImportDirectory>(() => new ImportDirectory(peBytes, PeHeaders));
-            
-            LoadConfigDirectory = new Lazy<LoadConfigDirectory>(() => new LoadConfigDirectory(peBytes, PeHeaders));
+            BaseRelocationDirectory = new BaseRelocationDirectory(peReader.PEHeaders, imageBytes);
 
-            PeHeaders = peReader.PEHeaders;
-            
-            TlsDirectory = new Lazy<TlsDirectory>(() => new TlsDirectory(peBytes, PeHeaders));
-        }
-        
-        private static CodeViewDebugDirectoryData ReadCodeViewDebugDirectoryData(PEReader peReader)
-        {
-            // Look for the first code view entry in the debug directory entries
-            
+            DelayImportDirectory = new DelayImportDirectory(peReader.PEHeaders, imageBytes);
+
+            ExportDirectory = new ExportDirectory(peReader.PEHeaders, imageBytes);
+
+            Headers = peReader.PEHeaders;
+
+            ImportDirectory = new ImportDirectory(peReader.PEHeaders, imageBytes);
+
+            LoadConfigDirectory = new LoadConfigDirectory(peReader.PEHeaders, imageBytes);
+
             var debugDirectoryEntries = peReader.ReadDebugDirectory();
-            
-            var codeViewEntry = debugDirectoryEntries.FirstOrDefault(entry => entry.Type == DebugDirectoryEntryType.CodeView);
 
-            return codeViewEntry.Equals(default(DebugDirectoryEntry)) ? default : peReader.ReadCodeViewDebugDirectoryData(codeViewEntry);
+            if (debugDirectoryEntries.Any(entry => entry.Type == DebugDirectoryEntryType.CodeView))
+            {
+                var codeViewEntry = debugDirectoryEntries.First(entry => entry.Type == DebugDirectoryEntryType.CodeView);
+
+                PdbData = peReader.ReadCodeViewDebugDirectoryData(codeViewEntry);
+            }
+
+            TlsDirectory = new TlsDirectory(peReader.PEHeaders, imageBytes);
+
+            ValidatePeImage();
         }
 
-        private static void ValidatePeImage(PEHeaders peHeaders)
+        private void ValidatePeImage()
         {
-            if (!peHeaders.IsDll)
+            if (!Headers.IsDll)
             {
                 throw new BadImageFormatException("The provided file was not a valid DLL");
             }
 
-            if (peHeaders.CorHeader != null)
+            if (Headers.CorHeader != null)
             {
                 throw new BadImageFormatException("The provided file was a managed DLL and cannot be mapped");
             }

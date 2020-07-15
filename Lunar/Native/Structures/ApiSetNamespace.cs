@@ -2,7 +2,7 @@
 
 namespace Lunar.Native.Structures
 {
-    [StructLayout(LayoutKind.Explicit)]
+    [StructLayout(LayoutKind.Explicit, Size = 28)]
     internal readonly struct ApiSetNamespace
     {
         [FieldOffset(0x0C)]
@@ -10,5 +10,11 @@ namespace Lunar.Native.Structures
 
         [FieldOffset(0x10)]
         internal readonly int EntryOffset;
+
+        [FieldOffset(0x14)]
+        internal readonly int HashOffset;
+
+        [FieldOffset(0x18)]
+        internal readonly int HashFactor;
     }
 }

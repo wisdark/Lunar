@@ -1,84 +1,82 @@
 ﻿using System;
 using System.Collections.Generic;
-using System.Collections.Immutable;
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text;
-using System.Text.RegularExpressions;
 using Lunar.Extensions;
 using Lunar.Native.Enumerations;
-using Lunar.Native.PInvoke;
 using Lunar.Native.Structures;
 using Lunar.RemoteProcess.Structures;
-using Lunar.Shared;
 
 namespace Lunar.RemoteProcess
 {
     internal sealed class PebAccessor
     {
-        internal Lazy<ImmutableDictionary<string, string>> ApiSetMappings { get; }
-
         private readonly PebData _pebData;
 
         private readonly Process _process;
 
         internal PebAccessor(Process process)
         {
-            _pebData = ReadPebData(process);
-
             _process = process;
-            
-            ApiSetMappings = new Lazy<ImmutableDictionary<string, string>>(ReadApiSetMappings);
+
+            _pebData = ReadPebData();
         }
 
-        internal IEnumerable<Module> ReadModuleEntries()
+        internal IEnumerable<Module> ReadModules()
         {
             if (_process.GetArchitecture() == Architecture.X86)
             {
-                var wow64FilePathRegex = new Regex("System32", RegexOptions.IgnoreCase);
-                
-                // Read the loader data of the WOW64 PEB
+                // Read the loader data of the PEB
 
-                var loaderData = _process.ReadStructure<PebLdrData32>(_pebData.Loader);
+                var loaderData = _process.ReadStructure<PebLdrData32>(_pebData.LoaderAddress);
 
-                // Read the entries of the InMemoryOrder linked list
+                // Traverse the InMemoryOrder module list
 
-                var currentEntryAddress = loaderData.InMemoryOrderModuleList.Flink;
+                var currentEntryAddress = new IntPtr(loaderData.InMemoryOrderModuleList.Flink);
 
                 var inMemoryOrderLinksOffset = Marshal.OffsetOf<LdrDataTableEntry32>("InMemoryOrderLinks");
 
                 while (true)
                 {
-                    var entry = _process.ReadStructure<LdrDataTableEntry32>(new IntPtr(currentEntryAddress- inMemoryOrderLinksOffset.ToInt32()));
+                    // Read the loader entry
+
+                    var entryAddress = currentEntryAddress - inMemoryOrderLinksOffset.ToInt32();
+
+                    var entry = _process.ReadStructure<LdrDataTableEntry32>(entryAddress);
 
                     // Read the file path of the entry
 
-                    var entryFilePathBytes = _process.ReadMemory(new IntPtr(entry.FullDllName.Buffer), entry.FullDllName.Length);
+                    var entryFilePathAddress = new IntPtr(entry.FullDllName.Buffer);
 
-                    var entryFilePath = Encoding.Unicode.GetString(entryFilePathBytes.Span);
+                    var entryFilePathBlock = _process.ReadArray<byte>(entryFilePathAddress, entry.FullDllName.Length);
+
+                    var entryFilePath = Encoding.Unicode.GetString(entryFilePathBlock);
 
                     if (Environment.Is64BitOperatingSystem)
                     {
-                        entryFilePath = wow64FilePathRegex.Replace(entryFilePath, "SysWOW64");
+                        // Redirect the file path to the WOW64 system directory
+
+                        entryFilePath = entryFilePath.Replace("System32", "SysWOW64", StringComparison.OrdinalIgnoreCase);
                     }
 
-                    // Read the name of the entry
+                    // Read the name of the loader entry
 
-                    var entryNameBytes = _process.ReadMemory(new IntPtr(entry.BaseDllName.Buffer), entry.BaseDllName.Length);
+                    var entryNameAddress = new IntPtr(entry.BaseDllName.Buffer);
 
-                    var entryName = Encoding.Unicode.GetString(entryNameBytes.Span);
+                    var entryNameBlock = _process.ReadArray<byte>(entryNameAddress, entry.BaseDllName.Length);
 
-                    yield return new Module(new IntPtr(entry.DllBase), entryName, entryFilePath);
+                    var entryName = Encoding.Unicode.GetString(entryNameBlock);
 
-                    if (currentEntryAddress == loaderData.InMemoryOrderModuleList.Blink)
+                    yield return new Module(new IntPtr(entry.DllBase), entryFilePath, entryName);
+
+                    if (currentEntryAddress.ToInt32() == loaderData.InMemoryOrderModuleList.Blink)
                     {
                         break;
                     }
 
-                    // Determine the address of the next entry
-
-                    currentEntryAddress = entry.InMemoryOrderLinks.Flink;
+                    currentEntryAddress = new IntPtr(entry.InMemoryOrderLinks.Flink);
                 }
             }
 
@@ -86,138 +84,168 @@ namespace Lunar.RemoteProcess
             {
                 // Read the loader data of the PEB
 
-                var loaderData = _process.ReadStructure<PebLdrData64>(_pebData.Loader);
+                var loaderData = _process.ReadStructure<PebLdrData64>(_pebData.LoaderAddress);
 
-                // Read the entries of the InMemoryOrder linked list
+                // Traverse the InMemoryOrder module list
 
-                var currentEntryAddress = loaderData.InMemoryOrderModuleList.Flink;
+                var currentEntryAddress = new IntPtr(loaderData.InMemoryOrderModuleList.Flink);
 
                 var inMemoryOrderLinksOffset = Marshal.OffsetOf<LdrDataTableEntry64>("InMemoryOrderLinks");
 
                 while (true)
                 {
-                    var entry = _process.ReadStructure<LdrDataTableEntry64>(new IntPtr(currentEntryAddress - inMemoryOrderLinksOffset.ToInt32()));
+                    // Read the loader entry
+
+                    var entryAddress = currentEntryAddress - inMemoryOrderLinksOffset.ToInt32();
+
+                    var entry = _process.ReadStructure<LdrDataTableEntry64>(entryAddress);
 
                     // Read the file path of the entry
 
-                    var entryFilePathBytes = _process.ReadMemory(new IntPtr(entry.FullDllName.Buffer), entry.FullDllName.Length);
+                    var entryFilePathAddress = new IntPtr(entry.FullDllName.Buffer);
 
-                    var entryFilePath = Encoding.Unicode.GetString(entryFilePathBytes.Span);
+                    var entryFilePathBlock = _process.ReadArray<byte>(entryFilePathAddress, entry.FullDllName.Length);
 
-                    // Read the name of the entry
+                    var entryFilePath = Encoding.Unicode.GetString(entryFilePathBlock);
 
-                    var entryNameBytes = _process.ReadMemory(new IntPtr(entry.BaseDllName.Buffer), entry.BaseDllName.Length);
+                    // Read the name of the loader entry
 
-                    var entryName = Encoding.Unicode.GetString(entryNameBytes.Span);
+                    var entryNameAddress = new IntPtr(entry.BaseDllName.Buffer);
 
-                    yield  return new Module(new IntPtr(entry.DllBase), entryName, entryFilePath);
+                    var entryNameBlock = _process.ReadArray<byte>(entryNameAddress, entry.BaseDllName.Length);
 
-                    if (currentEntryAddress == loaderData.InMemoryOrderModuleList.Blink)
+                    var entryName = Encoding.Unicode.GetString(entryNameBlock);
+
+                    yield return new Module(new IntPtr(entry.DllBase), entryFilePath, entryName);
+
+                    if (currentEntryAddress.ToInt64() == loaderData.InMemoryOrderModuleList.Blink)
                     {
                         break;
                     }
 
-                    // Determine the address of the next entry
-
-                    currentEntryAddress = entry.InMemoryOrderLinks.Flink;
+                    currentEntryAddress = new IntPtr(entry.InMemoryOrderLinks.Flink);
                 }
             }
         }
 
-        private static PebData ReadPebData(Process process)
+        internal string ResolveApiSetName(string apiSetName)
         {
-            if (process.GetArchitecture() == Architecture.X86)
-            {
-                // Query the remote process for the address of its WOW64 PEB
-                
-                var wow64PebAddressBytes = new byte[IntPtr.Size];
-                
-                var ntStatus = Ntdll.NtQueryInformationProcess(process.SafeHandle, ProcessInformationClass.Wow64Information, ref wow64PebAddressBytes[0], wow64PebAddressBytes.Length, out _);
+            // Read the API set namespace
 
-                if (ntStatus != NtStatus.Success)
+            var @namespace = _process.ReadStructure<ApiSetNamespace>(_pebData.ApiSetMapAddress);
+
+            // Hash the API set name, skipping the patch number and prefix
+
+            var charactersToHash = apiSetName.LastIndexOf("-", StringComparison.Ordinal);
+
+            var nameHash = 0;
+
+            for (var characterIndex = 0; characterIndex < charactersToHash; characterIndex += 1)
+            {
+                nameHash = nameHash * @namespace.HashFactor + char.ToLower(apiSetName[characterIndex]);
+            }
+
+            // Traverse the API set namespace for the corresponding namespace entry
+
+            ApiSetNamespaceEntry namespaceEntry;
+
+            var minimumNamespaceEntryIndex = 0;
+
+            var maximumNamespaceEntryIndex = @namespace.Count - 1;
+
+            while (true)
+            {
+                if (maximumNamespaceEntryIndex < minimumNamespaceEntryIndex)
                 {
-                    throw ExceptionBuilder.BuildWin32Exception("NtQueryInformationProcess", ntStatus);
+                    throw new ApplicationException("Failed to resolve the name of an API set");
                 }
-                
-                var wow64PebAddress = MemoryMarshal.Read<IntPtr>(wow64PebAddressBytes);
-                
-                // Read the WOW64 PEB data
-                
-                var wow64Peb = process.ReadStructure<Peb32>(wow64PebAddress);
-                
-                return new PebData(new IntPtr(wow64Peb.ApiSetMap), new IntPtr(wow64Peb.Ldr));
+
+                var middleNamespaceEntryIndex = (minimumNamespaceEntryIndex + maximumNamespaceEntryIndex) / 2;
+
+                // Read the API set hash entry
+
+                var hashEntryAddress = _pebData.ApiSetMapAddress + @namespace.HashOffset + middleNamespaceEntryIndex * Unsafe.SizeOf<ApiSetHashEntry>();
+
+                var hashEntry = _process.ReadStructure<ApiSetHashEntry>(hashEntryAddress);
+
+                if (nameHash == hashEntry.Hash)
+                {
+                    // Read the API set namespace entry
+
+                    var namespaceEntryAddress = _pebData.ApiSetMapAddress + @namespace.EntryOffset + hashEntry.Index * Unsafe.SizeOf<ApiSetNamespaceEntry>();
+
+                    namespaceEntry = _process.ReadStructure<ApiSetNamespaceEntry>(namespaceEntryAddress);
+
+                    break;
+                }
+
+                if ((uint) nameHash < (uint) hashEntry.Hash)
+                {
+                    maximumNamespaceEntryIndex = middleNamespaceEntryIndex - 1;
+                }
+
+                else
+                {
+                    minimumNamespaceEntryIndex = middleNamespaceEntryIndex + 1;
+                }
+            }
+
+            // Read the API set value entry that the API set namespace entry maps to
+
+            var valueEntryAddress = _pebData.ApiSetMapAddress + namespaceEntry.ValueOffset;
+
+            var valueEntry = _process.ReadStructure<ApiSetValueEntry>(valueEntryAddress);
+
+            // Read the name of the API set value entry
+
+            var valueEntryNameAddress = _pebData.ApiSetMapAddress + valueEntry.ValueOffset;
+
+            var valueEntryNameBlock = _process.ReadArray<byte>(valueEntryNameAddress, valueEntry.ValueCount);
+
+            return Encoding.Unicode.GetString(valueEntryNameBlock);
+        }
+
+        private PebData ReadPebData()
+        {
+            if (_process.GetArchitecture() == Architecture.X86)
+            {
+                IntPtr pebAddress;
+
+                if (Environment.Is64BitOperatingSystem)
+                {
+                    // Query the process for the address of its WOW64 PEB
+
+                    pebAddress = _process.QueryInformation<IntPtr>(ProcessInformationClass.Wow64Information);
+                }
+
+                else
+                {
+                    // Query the process for its BasicInformation
+
+                    var basicInformation = _process.QueryInformation<ProcessBasicInformation32>(ProcessInformationClass.BasicInformation);
+
+                    pebAddress = new IntPtr(basicInformation.PebBaseAddress);
+                }
+
+                // Read the PEB
+
+                var peb = _process.ReadStructure<Peb32>(pebAddress);
+
+                return new PebData(new IntPtr(peb.ApiSetMap), new IntPtr(peb.Ldr));
             }
 
             else
             {
-                // Query the remote process for its BasicInformation
+                // Query the process for its BasicInformation
 
-                var processBasicInformationBytes = new byte[Unsafe.SizeOf<ProcessBasicInformation64>()];
+                var basicInformation = _process.QueryInformation<ProcessBasicInformation64>(ProcessInformationClass.BasicInformation);
 
-                var ntStatus = Ntdll.NtQueryInformationProcess(process.SafeHandle, ProcessInformationClass.BasicInformation, ref processBasicInformationBytes[0], processBasicInformationBytes.Length, out _);
+                // Read the PEB
 
-                if (ntStatus != NtStatus.Success)
-                {
-                    throw ExceptionBuilder.BuildWin32Exception("NtQueryInformationProcess", ntStatus);
-                }
-                
-                var processBasicInformation = MemoryMarshal.Read<ProcessBasicInformation64>(processBasicInformationBytes);
-                
-                // Read the PEB data
-                
-                var peb = process.ReadStructure<Peb64>(new IntPtr(processBasicInformation.PebBaseAddress));
+                var peb = _process.ReadStructure<Peb64>(new IntPtr(basicInformation.PebBaseAddress));
 
                 return new PebData(new IntPtr(peb.ApiSetMap), new IntPtr(peb.Ldr));
             }
-        }
-
-        private ImmutableDictionary<string, string> ReadApiSetMappings()
-        {
-            var apiSetMappings = new Dictionary<string, string>();
-            
-            // Read the API set namespace
-
-            var apiSetNamespace = _process.ReadStructure<ApiSetNamespace>(_pebData.ApiSetMap);
-            
-            for (var namespaceEntryIndex = 0; namespaceEntryIndex < apiSetNamespace.Count; namespaceEntryIndex ++)
-            {
-                // Read the namespace entry
-
-                var namespaceEntryAddress = _pebData.ApiSetMap + apiSetNamespace.EntryOffset + Unsafe.SizeOf<ApiSetNamespaceEntry>() * namespaceEntryIndex;
-
-                var namespaceEntry = _process.ReadStructure<ApiSetNamespaceEntry>(namespaceEntryAddress);
-
-                // Read the name of the namespace entry
-
-                var namespaceEntryNameAddress = _pebData.ApiSetMap + namespaceEntry.NameOffset;
-
-                var namespaceEntryNameBytes = _process.ReadMemory(namespaceEntryNameAddress, namespaceEntry.NameLength);
-
-                var namespaceEntryName = $"{Encoding.Unicode.GetString(namespaceEntryNameBytes.Span)}.dll";
-                
-                // Read the value entry that the namespace entry maps to
-
-                var valueEntryAddress = _pebData.ApiSetMap + namespaceEntry.ValueOffset;
-
-                var valueEntry = _process.ReadStructure<ApiSetValueEntry>(valueEntryAddress);
-
-                if (valueEntry.ValueCount == 0)
-                {
-                    continue;
-                }
-                
-                // Read the name of the value entry
-
-                var valueEntryNameAddress = _pebData.ApiSetMap + valueEntry.ValueOffset;
-
-                var valueEntryNameBytes = _process.ReadMemory(valueEntryNameAddress, valueEntry.ValueCount);
-
-                var valueEntryName = Encoding.Unicode.GetString(valueEntryNameBytes.Span);
-                
-                apiSetMappings.Add(namespaceEntryName, valueEntryName);
-            }
-            
-            return apiSetMappings.ToImmutableDictionary();
         }
     }
 }

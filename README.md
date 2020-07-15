@@ -4,81 +4,99 @@
 
 A lightweight native DLL mapping library that supports mapping directly from memory
 
-----
+---
 
 ### Features
 
-- Imports and delay imports are resolved
-- Relocations are performed
-- Image sections are mapped with the correct page protection
-- Exception handlers are initialised
-- A security cookie is generated and initialised
-- DLL entry point and TLS callbacks are called
+- x86 and x64 support
+- Direct memory mapping
+- Manual exception handler initialisation
+- Randomised security cookie generation
+- TLS callback execution
 
-----
+---
+
+### Caveats
+
+- The presence of a PDB for ntdll.dll is needed and, hence, will be automatically downloaded and cached on disk by the library
+
+---
 
 ### Getting started
 
-The example below demonstrates a simple implementation of the library
+The example below demonstrates a basic implementation of the library that maps a DLL from disk without its headers
 
 ```c#
+var process = Process.GetProcessesByName("")[0];
 
-var libraryMapper = new LibraryMapper(process, dllBytes);
+var dllFilePath = "";
 
-// Map the DLL into the process
+var flags = MappingFlags.DiscardHeaders;
 
-libraryMapper.MapLibrary();
+var mapper = new LibraryMapper(process, dllFilePath, flags);
 
-// Unmap the DLL from the process
-
-libraryMapper.UnmapLibrary();
-
+mapper.MapLibrary();
 ```
 
-----
+---
 
-### Constructors
+### LibraryMapper Class
+
+#### Constructors
 
 ```c#
-LibraryMapper(Process, Memory<byte>)
+LibraryMapper(Process, Memory<byte>, MappingFlags)
 ```
-Provides the functionality to map a DLL from memory into a remote process
-
+Provides the functionality to map a DLL from memory into a process
 
 ```c#
-LibraryMapper(Process, string)
+LibraryMapper(Process, string, MappingFlags)
 ```
 
-Provides the functionality to map a DLL from disk into a remote process
+Provides the functionality to map a DLL from disk into a process
 
-----
-
-### Properties
+#### Properties
 
 ```c#
 DllBaseAddress
 ```
 
-The base address of the DLL in the remote process after it has been mapped
+The base address of the DLL in the process after it has been mapped
 
-----
-
-### Methods
+#### Methods
 
 ```c#
 MapLibrary()
 ```
 
-Maps the DLL into the remote process
+Maps the DLL into the process
 
 ```c#
 UnmapLibrary()
 ```
 
-Unmaps the DLL from the remote process
+Unmaps the DLL from the process
 
-----
+---
 
-### Caveats
+### MappingFlags Enum
 
-- Mapping requires the presence of a PDB for ntdll.dll, and, so, the library will automatically download the latest version of this PDB from the Microsoft symbol server and cache it in `%appdata%/Lunar/Dependencies`
+#### Fields
+
+```c#
+MappingsFlags.None
+```
+
+Default flag
+
+```c#
+MappingsFlags.DiscardHeaders 
+```
+
+Specifies that the header region of the DLL should not be mapped
+
+```c#
+MappingsFlags.SkipInitialisationRoutines
+```
+
+Specifies that TLS callbacks and DllMain should not be called

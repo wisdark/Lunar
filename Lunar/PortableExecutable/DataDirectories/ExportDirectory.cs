@@ -1,6 +1,5 @@
 ﻿using System;
 using System.Collections.Generic;
-using System.Collections.Immutable;
 using System.Reflection.PortableExecutable;
 using System.Runtime.InteropServices;
 using Lunar.Native.Structures;
@@ -10,76 +9,74 @@ namespace Lunar.PortableExecutable.DataDirectories
 {
     internal sealed class ExportDirectory : DataDirectory
     {
-        internal ImmutableArray<ExportedFunction> ExportedFunctions { get; }
+        internal IEnumerable<ExportedFunction> ExportedFunctions { get; }
 
-        internal ExportDirectory(ReadOnlyMemory<byte> peBytes, PEHeaders peHeaders) : base(peBytes, peHeaders)
+        internal ExportDirectory(PEHeaders headers, Memory<byte> imageBlock) : base(headers, imageBlock)
         {
-            ExportedFunctions = ReadExportedFunctions().ToImmutableArray();
+            ExportedFunctions = ReadExportedFunctions();
         }
 
         private IEnumerable<ExportedFunction> ReadExportedFunctions()
         {
-            // Calculate the offset of the export table
-            
-            if (!PeHeaders.TryGetDirectoryOffset(PeHeaders.PEHeader.ExportTableDirectory, out var exportTableOffset))
+            if (!Headers.TryGetDirectoryOffset(Headers.PEHeader.ExportTableDirectory, out var exportDirectoryOffset))
             {
                 yield break;
             }
-            
-            // Read the export table
-            
-            var exportTable = MemoryMarshal.Read<ImageExportDirectory>(PeBytes.Slice(exportTableOffset).Span);
-            
-            // Read the exported functions
-            
-            var functionNameBaseOffset = RvaToOffset(exportTable.AddressOfNames);
 
-            var functionOffsetBaseOffset = RvaToOffset(exportTable.AddressOfFunctions);
+            // Read the export directory
 
-            var functionOrdinalBaseOffset = RvaToOffset(exportTable.AddressOfNameOrdinals);
+            var exportDirectory = MemoryMarshal.Read<ImageExportDirectory>(ImageBlock.Span.Slice(exportDirectoryOffset));
 
-            for (var functionIndex = 0; functionIndex < exportTable.NumberOfNames; functionIndex ++)
+            var functionNamesRvasBaseOffset = RvaToOffset(exportDirectory.AddressOfNames);
+
+            var functionOrdinalsBaseOffset = RvaToOffset(exportDirectory.AddressOfNameOrdinals);
+
+            var functionRvasBaseOffset = RvaToOffset(exportDirectory.AddressOfFunctions);
+
+            for (var functionIndex = 0; functionIndex < exportDirectory.NumberOfNames; functionIndex += 1)
             {
-                // Read the name of the function
-                
-                var functionNameOffsetOffset = functionNameBaseOffset + sizeof(int) * functionIndex;
+                // Read the name of the exported function
 
-                var functionNameOffset = RvaToOffset(MemoryMarshal.Read<int>(PeBytes.Slice(functionNameOffsetOffset).Span));
+                var functionNameOffsetRvaOffset = functionNamesRvasBaseOffset + functionIndex * sizeof(int);
 
-                var functionName = ReadNullTerminatedString(functionNameOffset);
-                
-                // Read the ordinal of the function
-                
-                var functionOrdinalOffset = functionOrdinalBaseOffset + sizeof(short) * functionIndex;
+                var functionNameOffsetRva = MemoryMarshal.Read<int>(ImageBlock.Span.Slice(functionNameOffsetRvaOffset));
 
-                var functionOrdinal = MemoryMarshal.Read<short>(PeBytes.Slice(functionOrdinalOffset).Span);
-                
-                // Read the offset of the function
-                
-                var functionOffsetOffset = functionOffsetBaseOffset + sizeof(int) * functionOrdinal;
+                var functionNameOffset = RvaToOffset(functionNameOffsetRva);
 
-                var functionOffset = MemoryMarshal.Read<int>(PeBytes.Slice(functionOffsetOffset).Span);
+                var functionName = ReadString(functionNameOffset);
 
-                // Determine if the function is forwarded to another function
-                
-                var exportTableStartOffset = PeHeaders.PEHeader.ExportTableDirectory.RelativeVirtualAddress;
+                // Read the ordinal of the exported function
 
-                var exportTableEndOffset = exportTableStartOffset + PeHeaders.PEHeader.ExportTableDirectory.Size;
+                var functionOrdinalOffset = functionOrdinalsBaseOffset + functionIndex * sizeof(short);
 
-                if (functionOffset < exportTableStartOffset || functionOffset > exportTableEndOffset)
+                var functionOrdinal = MemoryMarshal.Read<short>(ImageBlock.Span.Slice(functionOrdinalOffset));
+
+                // Read the relative virtual address of the function
+
+                var functionRvaOffset = functionRvasBaseOffset + functionOrdinal * sizeof(int);
+
+                var functionRva = MemoryMarshal.Read<int>(ImageBlock.Span.Slice(functionRvaOffset));
+
+                // Check if the exported function is forwarded
+
+                var exportDirectoryStartOffset = Headers.PEHeader.ExportTableDirectory.RelativeVirtualAddress;
+
+                var exportDirectoryEndOffset = exportDirectoryStartOffset + Headers.PEHeader.ExportTableDirectory.Size;
+
+                if (functionRva < exportDirectoryStartOffset || functionRva > exportDirectoryEndOffset)
                 {
-                    yield return new ExportedFunction(null, functionName, functionOffset, exportTable.Base + functionOrdinal);
+                    yield return new ExportedFunction(null, functionName, exportDirectory.Base + functionOrdinal, functionRva);
 
                     continue;
                 }
-                
-                // Read the forwarder string of the function
-                
-                var forwarderStringOffset = RvaToOffset(functionOffset);
 
-                var forwarderString = ReadNullTerminatedString(forwarderStringOffset);
-                
-                yield return new ExportedFunction(forwarderString, functionName, functionOffset, exportTable.Base + functionOrdinal);
+                // Read the forwarder string
+
+                var forwarderStringOffset = RvaToOffset(functionRva);
+
+                var forwarderString = ReadString(forwarderStringOffset);
+
+                yield return new ExportedFunction(forwarderString, functionName, exportDirectory.Base + functionOrdinal, functionRva);
             }
         }
     }

@@ -6,34 +6,44 @@ namespace Lunar.PortableExecutable
 {
     internal abstract class DataDirectory
     {
-        protected ReadOnlyMemory<byte> PeBytes { get; }
-        
-        protected PEHeaders PeHeaders { get; }
+        protected PEHeaders Headers { get; }
 
-        protected DataDirectory(ReadOnlyMemory<byte> peBytes, PEHeaders peHeaders)
+        protected Memory<byte> ImageBlock { get; }
+
+        protected DataDirectory(PEHeaders headers, Memory<byte> imageBlock)
         {
-            PeBytes = peBytes;
+            Headers = headers;
 
-            PeHeaders = peHeaders;
+            ImageBlock = imageBlock;
         }
 
-        protected string ReadNullTerminatedString(int offset)
+        protected string ReadString(int offset)
         {
             var stringLength = 0;
 
-            while (PeBytes.Span[offset + stringLength] != byte.MinValue)
+            while (ImageBlock.Span[offset + stringLength] != byte.MinValue)
             {
                 stringLength += 1;
             }
 
-            return Encoding.UTF8.GetString(PeBytes.Slice(offset, stringLength).Span);
+            return Encoding.UTF8.GetString(ImageBlock.Span.Slice(offset, stringLength));
         }
-        
+
         protected int RvaToOffset(int rva)
         {
-            var sectionHeader = PeHeaders.SectionHeaders[PeHeaders.GetContainingSectionIndex(rva)];
+            var sectionHeader = Headers.SectionHeaders[Headers.GetContainingSectionIndex(rva)];
 
             return rva - sectionHeader.VirtualAddress + sectionHeader.PointerToRawData;
+        }
+
+        protected int VaToRva(int va)
+        {
+            return (int) (va - (int) Headers.PEHeader.ImageBase);
+        }
+
+        protected int VaToRva(long va)
+        {
+            return (int) (va - (long) Headers.PEHeader.ImageBase);
         }
     }
 }
