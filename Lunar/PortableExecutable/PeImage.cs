@@ -1,6 +1,5 @@
 ﻿using System;
-using System.IO;
-using System.Linq;
+using System.Collections.Immutable;
 using System.Reflection.PortableExecutable;
 using Lunar.PortableExecutable.DataDirectories;
 
@@ -8,10 +7,6 @@ namespace Lunar.PortableExecutable
 {
     internal sealed class PeImage
     {
-        internal BaseRelocationDirectory BaseRelocationDirectory { get; }
-
-        internal DelayImportDirectory DelayImportDirectory { get; }
-
         internal ExportDirectory ExportDirectory { get; }
 
         internal PEHeaders Headers { get; }
@@ -20,17 +15,20 @@ namespace Lunar.PortableExecutable
 
         internal LoadConfigDirectory LoadConfigDirectory { get; }
 
-        internal CodeViewDebugDirectoryData PdbData { get; }
+        internal RelocationDirectory RelocationDirectory { get; }
+
+        internal ResourceDirectory ResourceDirectory { get; }
 
         internal TlsDirectory TlsDirectory { get; }
 
         internal PeImage(Memory<byte> imageBytes)
         {
-            using var peReader = new PEReader(new MemoryStream(imageBytes.ToArray()));
+            using var peReader = new PEReader(imageBytes.ToArray().ToImmutableArray());
 
-            BaseRelocationDirectory = new BaseRelocationDirectory(peReader.PEHeaders, imageBytes);
-
-            DelayImportDirectory = new DelayImportDirectory(peReader.PEHeaders, imageBytes);
+            if (peReader.PEHeaders.PEHeader is null || !peReader.PEHeaders.IsDll)
+            {
+                throw new BadImageFormatException("The provided file was not a valid DLL");
+            }
 
             ExportDirectory = new ExportDirectory(peReader.PEHeaders, imageBytes);
 
@@ -40,31 +38,11 @@ namespace Lunar.PortableExecutable
 
             LoadConfigDirectory = new LoadConfigDirectory(peReader.PEHeaders, imageBytes);
 
-            var debugDirectoryEntries = peReader.ReadDebugDirectory();
+            RelocationDirectory = new RelocationDirectory(peReader.PEHeaders, imageBytes);
 
-            if (debugDirectoryEntries.Any(entry => entry.Type == DebugDirectoryEntryType.CodeView))
-            {
-                var codeViewEntry = debugDirectoryEntries.First(entry => entry.Type == DebugDirectoryEntryType.CodeView);
-
-                PdbData = peReader.ReadCodeViewDebugDirectoryData(codeViewEntry);
-            }
+            ResourceDirectory = new ResourceDirectory(peReader.PEHeaders, imageBytes);
 
             TlsDirectory = new TlsDirectory(peReader.PEHeaders, imageBytes);
-
-            ValidatePeImage();
-        }
-
-        private void ValidatePeImage()
-        {
-            if (!Headers.IsDll)
-            {
-                throw new BadImageFormatException("The provided file was not a valid DLL");
-            }
-
-            if (Headers.CorHeader != null)
-            {
-                throw new BadImageFormatException("The provided file was a managed DLL and cannot be mapped");
-            }
         }
     }
 }

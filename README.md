@@ -6,25 +6,25 @@ A lightweight native DLL mapping library that supports mapping directly from mem
 
 ---
 
-### Features
+### Notable features
 
-- x86 and x64 support
-- Direct memory mapping
-- Manual exception handler initialisation
-- Randomised security cookie generation
+- Exception handler initialisation
+- Security cookie generation
+- SxS dependency resolution
 - TLS callback execution
+- x86 and x64 support
 
 ---
 
 ### Caveats
 
-- The presence of a PDB for ntdll.dll is needed and, hence, will be automatically downloaded and cached on disk by the library
+- The latest version of the PDB for ntdll.dll is downloaded and cached on disk by the library
 
 ---
 
 ### Getting started
 
-The example below demonstrates a basic implementation of the library that maps a DLL from disk without its headers
+The example below demonstrates a basic implementation of the library
 
 ```c#
 var process = Process.GetProcessesByName("")[0];
@@ -42,61 +42,75 @@ mapper.MapLibrary();
 
 ### LibraryMapper Class
 
-#### Constructors
+Provides the functionality to map a DLL from disk or memory into a process
 
 ```c#
-LibraryMapper(Process, Memory<byte>, MappingFlags)
+public sealed class LibraryMapper
 ```
-Provides the functionality to map a DLL from memory into a process
+
+### Constructors
+
+Initialises an instance of the `LibraryMapper` class with the functionality to map a DLL from memory into a process
 
 ```c#
-LibraryMapper(Process, string, MappingFlags)
+public LibraryMapper(Process, Memory<byte>, MappingFlags);
 ```
 
-Provides the functionality to map a DLL from disk into a process
-
-#### Properties
+Initialises an instance of the `LibraryMapper` class with the functionality to map a DLL from disk into a process
 
 ```c#
-DllBaseAddress
+public LibraryMapper(Process, string, MappingFlags);
 ```
+
+### Properties
 
 The base address of the DLL in the process after it has been mapped
 
-#### Methods
-
 ```c#
-MapLibrary()
+public IntPtr DllBaseAddress { get; }
 ```
+
+### Methods
 
 Maps the DLL into the process
 
 ```c#
-UnmapLibrary()
+public void MapLibrary();
 ```
 
 Unmaps the DLL from the process
+
+```c#
+public void UnmapLibrary();
+```
 
 ---
 
 ### MappingFlags Enum
 
-#### Fields
+Defines actions that the mapper should take during the mapping process
+
+```c#
+[Flags]
+public enum MappingFlags
+```
+
+### Fields
+
+Default flag
 
 ```c#
 MappingsFlags.None
 ```
 
-Default flag
+Specifies that the header region of the DLL should not be mapped
 
 ```c#
 MappingsFlags.DiscardHeaders 
 ```
 
-Specifies that the header region of the DLL should not be mapped
+Specifies that any TLS callbacks and DllMain should not be called
 
 ```c#
 MappingsFlags.SkipInitialisationRoutines
 ```
-
-Specifies that TLS callbacks and DllMain should not be called

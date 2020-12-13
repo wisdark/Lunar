@@ -1,21 +1,40 @@
 name: Continuous Integration
 
-on: [push]
+on:
+    push:
+        branches: [master]
+    pull_request:
+        branches: [master]
 
 jobs:
   pipeline:
     runs-on: [windows-latest]
 
     steps:
-      - uses: actions/checkout@master
-      - uses: actions/setup-dotnet@master
+      - uses: actions/checkout@main
+      - uses: actions/setup-dotnet@main
         with:
+            dotnet-version: '5.0'
+
+      - name: Build Solution
+        run: dotnet build --configuration Release
+      
+      - name: Create Test Binaries
+        working-directory: Lunar.Tests\TestBinaries
+        run: ./Build.bat
+        
+      - name: Run Tests
+        run: dotnet test
+      
+      - name: Create Package
+        run: dotnet pack Lunar --configuration Release
+      
+      - uses: actions/setup-dotnet@main
+        with:
+            dotnet-version: '5.0'
             source-url: https://nuget.pkg.github.com/${{github.actor}}
         env:
             NUGET_AUTH_TOKEN: ${{secrets.GITHUB_TOKEN}}
-      - name: Build Library
-        run: dotnet build Lunar --configuration Release
-      - name: Create Package
-        run: dotnet pack Lunar --configuration Release
+
       - name: Publish Package
         run: dotnet nuget push 'Lunar\bin\Release\*.nupkg' --skip-duplicate
