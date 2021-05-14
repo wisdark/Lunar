@@ -11,7 +11,7 @@ namespace Lunar.PortableExecutable.DataDirectories
 {
     internal sealed class RelocationDirectory : DataDirectory
     {
-        internal RelocationDirectory(PEHeaders headers, Memory<byte> imageBytes) : base(headers, imageBytes, headers.PEHeader!.BaseRelocationTableDirectory) { }
+        internal RelocationDirectory(PEHeaders headers, Memory<byte> imageBytes) : base(headers.PEHeader!.BaseRelocationTableDirectory, headers, imageBytes) { }
 
         internal IEnumerable<Relocation> GetRelocations()
         {
@@ -22,11 +22,11 @@ namespace Lunar.PortableExecutable.DataDirectories
 
             var currentRelocationBlockOffset = DirectoryOffset;
 
-            while (true)
+            while (currentRelocationBlockOffset < DirectoryOffset + Headers.PEHeader!.BaseRelocationTableDirectory.Size)
             {
                 // Read the relocation block
 
-                var relocationBlock = MemoryMarshal.Read<ImageBaseRelocation>(ImageBytes.Span.Slice(currentRelocationBlockOffset));
+                var relocationBlock = MemoryMarshal.Read<ImageBaseRelocation>(ImageBytes.Span[currentRelocationBlockOffset..]);
 
                 if (relocationBlock.SizeOfBlock == 0)
                 {
@@ -41,7 +41,7 @@ namespace Lunar.PortableExecutable.DataDirectories
 
                     var relocationOffset = currentRelocationBlockOffset + Unsafe.SizeOf<ImageBaseRelocation>() + sizeof(short) * relocationIndex;
 
-                    var relocation = MemoryMarshal.Read<short>(ImageBytes.Span.Slice(relocationOffset));
+                    var relocation = MemoryMarshal.Read<short>(ImageBytes.Span[relocationOffset..]);
 
                     // The type is located in the upper 4 bits of the relocation
 

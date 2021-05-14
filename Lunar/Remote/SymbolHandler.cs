@@ -1,6 +1,6 @@
-﻿using System;
-using System.Collections.Immutable;
+using System;
 using System.ComponentModel;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Net;
@@ -8,6 +8,7 @@ using System.Reflection.PortableExecutable;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Threading.Tasks;
+using Lunar.Extensions;
 using Lunar.Native;
 using Lunar.Native.Enumerations;
 using Lunar.Native.PInvoke;
@@ -20,20 +21,21 @@ namespace Lunar.Remote
     {
         private readonly string _pdbFilePath;
 
-        internal SymbolHandler(string dllFilePath)
+        internal SymbolHandler(Process process)
         {
-            _pdbFilePath = FindOrDownloadPdb(dllFilePath).GetAwaiter().GetResult();
+            _pdbFilePath = FindOrDownloadSymbolFileAsync(process).GetAwaiter().GetResult();
         }
 
         internal Symbol GetSymbol(string symbolName)
         {
-            // Initialise a symbol handler
+            // Initialise a native symbol handler
 
-            Dbghelp.SymSetOptions(SymbolOptions.UndecorateName);
+            if (!Dbghelp.SymSetOptions(SymbolOptions.UndecorateName).HasFlag(SymbolOptions.UndecorateName))
+            {
+                throw new Win32Exception();
+            }
 
-            var currentProcessHandle = Kernel32.GetCurrentProcess();
-
-            if (!Dbghelp.SymInitialize(currentProcessHandle, null, false))
+            if (!Dbghelp.SymInitialize(Kernel32.GetCurrentProcess(), null, false))
             {
                 throw new Win32Exception();
             }
@@ -42,54 +44,64 @@ namespace Lunar.Remote
             {
                 const int pseudoDllAddress = 0x1000;
 
-                // Load the symbol table for the PDB into the symbol handler
+                // Load the symbol file into the symbol handler
 
-                var pdbSize = new FileInfo(_pdbFilePath).Length;
+                var symbolFileSize = new FileInfo(_pdbFilePath).Length;
 
-                var symbolTableAddress = Dbghelp.SymLoadModule(currentProcessHandle, IntPtr.Zero, _pdbFilePath, null, pseudoDllAddress, (int) pdbSize);
+                var symbolTableAddress = Dbghelp.SymLoadModuleEx(Kernel32.GetCurrentProcess(), IntPtr.Zero, _pdbFilePath, null, pseudoDllAddress, (int) symbolFileSize, IntPtr.Zero, 0);
 
                 if (symbolTableAddress == 0)
                 {
                     throw new Win32Exception();
                 }
 
-                // Initialise an array to receive the symbol information
-
-                var symbolInformationSize = (Unsafe.SizeOf<SymbolInfo>() + sizeof(char) * Constants.MaxSymbolNameLength + sizeof(long) - 1) / sizeof(long);
-
-                Span<byte> symbolInformationBytes = stackalloc byte[symbolInformationSize];
-
-                MemoryMarshal.Write(symbolInformationBytes, ref Unsafe.AsRef(new SymbolInfo(Unsafe.SizeOf<SymbolInfo>(), 0, Constants.MaxSymbolNameLength)));
-
-                // Retrieve the symbol information
-
-                if (!Dbghelp.SymFromName(currentProcessHandle, symbolName, out symbolInformationBytes[0]))
+                try
                 {
-                    throw new Win32Exception();
+                    // Initialise a buffer to store the symbol information
+
+                    Span<byte> symbolInformationBytes = stackalloc byte[(Unsafe.SizeOf<SymbolInfo>() + sizeof(char) * Constants.MaxSymbolNameLength + sizeof(long) - 1) / sizeof(long)];
+
+                    MemoryMarshal.Write(symbolInformationBytes, ref Unsafe.AsRef(new SymbolInfo(Unsafe.SizeOf<SymbolInfo>(), 0, Constants.MaxSymbolNameLength)));
+
+                    // Retrieve the symbol information
+
+                    if (!Dbghelp.SymFromName(Kernel32.GetCurrentProcess(), symbolName, out symbolInformationBytes[0]))
+                    {
+                        throw new Win32Exception();
+                    }
+
+                    var symbolInformation = MemoryMarshal.Read<SymbolInfo>(symbolInformationBytes);
+
+                    return new Symbol((int) (symbolInformation.Address - pseudoDllAddress));
                 }
 
-                var symbolInformation = MemoryMarshal.Read<SymbolInfo>(symbolInformationBytes);
-
-                return new Symbol((int) (symbolInformation.Address - pseudoDllAddress));
+                finally
+                {
+                    Dbghelp.SymUnloadModule64(Kernel32.GetCurrentProcess(), symbolTableAddress);
+                }
             }
 
             finally
             {
-                Dbghelp.SymCleanup(currentProcessHandle);
+                Dbghelp.SymCleanup(Kernel32.GetCurrentProcess());
             }
         }
 
-        private static async Task<string> FindOrDownloadPdb(string dllFilePath)
+        private static async Task<string> FindOrDownloadSymbolFileAsync(Process process)
         {
-            // Read the PDB data
+            // Read the PDB data of ntdll.dll
 
-            using var peReader = new PEReader(File.ReadAllBytes(dllFilePath).ToImmutableArray());
+            var systemDirectoryPath = process.GetArchitecture() == Architecture.X86 ? Environment.GetFolderPath(Environment.SpecialFolder.SystemX86) : Environment.SystemDirectory;
+
+            var ntdllFilePath = Path.Combine(systemDirectoryPath, "ntdll.dll");
+
+            using var peReader = new PEReader(File.OpenRead(ntdllFilePath));
 
             var codeViewEntry = peReader.ReadDebugDirectory().First(entry => entry.Type == DebugDirectoryEntryType.CodeView);
 
             var pdbData = peReader.ReadCodeViewDebugDirectoryData(codeViewEntry);
 
-            // Find or create the PDB cache directory
+            // Find or create the cache directory
 
             var cacheDirectoryPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "Lunar", "Dependencies");
 
@@ -130,9 +142,7 @@ namespace Lunar.Remote
                 Console.Write($"\rDownloading required files [{pdbData.Path}] - [{new string('=', progress)}{new string(' ', 50 - progress)}] - {eventArguments.ProgressPercentage}%");
             };
 
-            var pdbUri = new Uri($"https://msdl.microsoft.com/download/symbols/{pdbData.Path}/{pdbData.Guid:N}{pdbData.Age}/{pdbData.Path}");
-
-            await webClient.DownloadFileTaskAsync(pdbUri, pdbFilePath);
+            await webClient.DownloadFileTaskAsync(new Uri($"https://msdl.microsoft.com/download/symbols/{pdbData.Path}/{pdbData.Guid:N}{pdbData.Age}/{pdbData.Path}"), pdbFilePath);
 
             return pdbFilePath;
         }

@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
@@ -15,9 +15,7 @@ using Lunar.Native.Enumerations;
 using Lunar.Native.Structures;
 using Lunar.PortableExecutable;
 using Lunar.Remote;
-using Lunar.Shared;
-
-[assembly: CLSCompliant(true)]
+using Lunar.Utilities;
 
 namespace Lunar
 {
@@ -58,7 +56,7 @@ namespace Lunar
 
             if (!Environment.Is64BitProcess && process.GetArchitecture() == Architecture.X64)
             {
-                throw new NotSupportedException("The provided process cannot be loaded into from an x86 build");
+                throw new NotSupportedException("The provided process cannot be mapped into from an x86 build");
             }
 
             _dllBytes = dllBytes.ToArray();
@@ -89,7 +87,7 @@ namespace Lunar
 
             if (!Environment.Is64BitProcess && process.GetArchitecture() == Architecture.X64)
             {
-                throw new NotSupportedException("The provided process cannot be loaded into from an x86 build");
+                throw new NotSupportedException("The provided process cannot be mapped into from an x86 build");
             }
 
             _dllBytes = File.ReadAllBytes(dllFilePath);
@@ -98,7 +96,7 @@ namespace Lunar
 
             _mappingFlags = mappingFlags;
 
-            _peImage = new PeImage(_dllBytes.ToArray());
+            _peImage = new PeImage(File.ReadAllBytes(dllFilePath));
 
             _processContext = new ProcessContext(process);
         }
@@ -113,7 +111,7 @@ namespace Lunar
                 return;
             }
 
-            DllBaseAddress = _processContext.Process.AllocateMemory(_peImage.Headers.PEHeader!.SizeOfImage);
+            DllBaseAddress = _processContext.Memory.AllocateBuffer(_peImage.Headers.PEHeader!.SizeOfImage, ProtectionType.ReadOnly);
 
             try
             {
@@ -164,7 +162,7 @@ namespace Lunar
 
             catch
             {
-                Executor.IgnoreExceptions(() => _processContext.Process.FreeMemory(DllBaseAddress));
+                Executor.IgnoreExceptions(() => _processContext.Memory.FreeBuffer(DllBaseAddress));
 
                 DllBaseAddress = IntPtr.Zero;
 
@@ -182,53 +180,56 @@ namespace Lunar
                 return;
             }
 
+            var topLevelException = default(Exception);
+
             try
             {
-                try
+                if (!_mappingFlags.HasFlag(MappingFlags.SkipInitialisationRoutines))
                 {
-                    try
-                    {
-                        try
-                        {
-                            if (!_mappingFlags.HasFlag(MappingFlags.SkipInitialisationRoutines))
-                            {
-                                CallInitialisationRoutines(DllReason.ProcessDetach);
-                            }
-                        }
-
-                        catch
-                        {
-                            Executor.IgnoreExceptions(RemoveExceptionHandlers);
-
-                            throw;
-                        }
-
-                        RemoveExceptionHandlers();
-                    }
-
-                    catch
-                    {
-                        Executor.IgnoreExceptions(FreeDependencies);
-
-                        throw;
-                    }
-
-                    FreeDependencies();
+                    CallInitialisationRoutines(DllReason.ProcessDetach);
                 }
-
-                catch
-                {
-                    Executor.IgnoreExceptions(() => _processContext.Process.FreeMemory(DllBaseAddress));
-
-                    throw;
-                }
-
-                _processContext.Process.FreeMemory(DllBaseAddress);
             }
 
-            finally
+            catch (Exception exception)
             {
-                DllBaseAddress = IntPtr.Zero;
+                topLevelException ??= exception;
+            }
+
+            try
+            {
+                RemoveExceptionHandlers();
+            }
+
+            catch (Exception exception)
+            {
+                topLevelException ??= exception;
+            }
+
+            try
+            {
+                FreeDependencies();
+            }
+
+            catch (Exception exception)
+            {
+                topLevelException ??= exception;
+            }
+
+            try
+            {
+                _processContext.Memory.FreeBuffer(DllBaseAddress);
+            }
+
+            catch (Exception exception)
+            {
+                topLevelException ??= exception;
+            }
+
+            DllBaseAddress = IntPtr.Zero;
+
+            if (topLevelException is not null)
+            {
+                throw topLevelException;
             }
         }
 
@@ -242,7 +243,7 @@ namespace Lunar
 
                     var functionAddress = function.Name is null ? _processContext.GetFunctionAddress(importDescriptor.Name, function.Ordinal) : _processContext.GetFunctionAddress(importDescriptor.Name, function.Name);
 
-                    MemoryMarshal.Write(_dllBytes.Span.Slice(function.Offset), ref functionAddress);
+                    MemoryMarshal.Write(_dllBytes.Span[function.Offset..], ref functionAddress);
                 }
             });
         }
@@ -297,49 +298,24 @@ namespace Lunar
                 return;
             }
 
-            if (_processContext.Process.GetArchitecture() == Architecture.X86)
+            // Generate a randomised security cookie
+
+            var securityCookieBytes = _processContext.Process.GetArchitecture() == Architecture.X86 ? stackalloc byte[4] : stackalloc byte[6];
+
+            RandomNumberGenerator.Fill(securityCookieBytes);
+
+            // Ensure the default security cookie was not generated
+
+            if (securityCookieBytes.SequenceEqual(stackalloc byte[] {0xBB, 0x40, 0xE6, 0x4E}) || securityCookieBytes.SequenceEqual(stackalloc byte[] {0x2B, 0x99, 0x2D, 0xDF, 0xA2, 0x32}))
             {
-                // Generate a randomised security cookie
-
-                Span<byte> securityCookieBytes = stackalloc byte[4];
-
-                RandomNumberGenerator.Fill(securityCookieBytes);
-
-                // Ensure the default security cookie was not generated
-
-                if (securityCookieBytes.SequenceEqual(stackalloc byte[] {0xBB, 0x40, 0xE6, 0x4E}))
-                {
-                    securityCookieBytes[^1] += 1;
-                }
-
-                // Initialise the security cookie
-
-                var securityCookieAddress = DllBaseAddress + securityCookie.RelativeAddress;
-
-                _processContext.Process.WriteArray(securityCookieAddress, securityCookieBytes);
+                securityCookieBytes[^1] += 1;
             }
 
-            else
-            {
-                // Generate a randomised security cookie
+            // Initialise the security cookie
 
-                Span<byte> securityCookieBytes = stackalloc byte[6];
+            var securityCookieAddress = DllBaseAddress + securityCookie.RelativeAddress;
 
-                RandomNumberGenerator.Fill(securityCookieBytes);
-
-                // Ensure the default security cookie was not generated
-
-                if (securityCookieBytes.SequenceEqual(stackalloc byte[] {0x2B, 0x99, 0x2D, 0xDF, 0xA2, 0x32}))
-                {
-                    securityCookieBytes[^1] += 1;
-                }
-
-                // Initialise the security cookie
-
-                var securityCookieAddress = DllBaseAddress + securityCookie.RelativeAddress;
-
-                _processContext.Process.WriteArray(securityCookieAddress, securityCookieBytes);
-            }
+            _processContext.Memory.WriteSpan(securityCookieAddress, securityCookieBytes);
         }
 
         private void InsertExceptionHandlers()
@@ -352,7 +328,7 @@ namespace Lunar
 
                 var functionTableAddress = _processContext.GetNtdllSymbolAddress("LdrpInvertedFunctionTable");
 
-                var functionTable = _processContext.Process.ReadStructure<InvertedFunctionTable>(functionTableAddress);
+                var functionTable = _processContext.Memory.ReadStructure<InvertedFunctionTable>(functionTableAddress);
 
                 if (functionTable.Overflow == 1)
                 {
@@ -372,19 +348,15 @@ namespace Lunar
 
                     var functionTableEntryArrayAddress = functionTableAddress + Unsafe.SizeOf<InvertedFunctionTable>();
 
-                    var functionTableEntryArray = _processContext.Process.ReadArray<InvertedFunctionTableEntry32>(functionTableEntryArrayAddress, Constants.InvertedFunctionTableSize);
+                    var functionTableEntryArray = _processContext.Memory.ReadSpan<InvertedFunctionTableEntry32>(functionTableEntryArrayAddress, Constants.InvertedFunctionTableSize);
 
-                    // Initialise a new function table entry array
-
-                    var newFunctionTableEntryArray = functionTableEntryArray.ToArray();
-
-                    // Determine where the new function table entry should be inserted
+                    // Determine the index where the entry for the DLL should be inserted
 
                     var insertionIndex = 1;
 
                     while (insertionIndex < functionTable.Count)
                     {
-                        if ((uint) DllBaseAddress.ToInt32() < (uint) newFunctionTableEntryArray[insertionIndex].ImageBase)
+                        if ((uint) DllBaseAddress.ToInt32() < (uint) functionTableEntryArray[insertionIndex].ImageBase)
                         {
                             break;
                         }
@@ -394,11 +366,11 @@ namespace Lunar
 
                     if (insertionIndex < functionTable.Count)
                     {
-                        // Shift the existing elements to make space for the new function table entry
+                        // Shift the existing elements to make space for the entry for the DLL
 
                         for (var entryIndex = functionTable.Count - 1; entryIndex >= insertionIndex; entryIndex -= 1)
                         {
-                            newFunctionTableEntryArray[entryIndex + 1] = newFunctionTableEntryArray[entryIndex];
+                            functionTableEntryArray[entryIndex + 1] = functionTableEntryArray[entryIndex];
                         }
                     }
 
@@ -406,7 +378,7 @@ namespace Lunar
 
                     var sharedUserDataAddress = SafeHelpers.CreateSafePointer(Constants.SharedUserDataAddress);
 
-                    var sharedUserData = _processContext.Process.ReadStructure<KUserSharedData>(sharedUserDataAddress);
+                    var sharedUserData = _processContext.Memory.ReadStructure<KUserSharedData>(sharedUserDataAddress);
 
                     // Encode the address of the exception directory using the system pointer encoding algorithm
 
@@ -418,33 +390,11 @@ namespace Lunar
 
                     var rotatedAddress = (xoredAddress >> lowerCookieBits) | (xoredAddress << (32 - lowerCookieBits));
 
-                    // Initialise a new function table entry for the DLL
+                    // Update the function table entry array
 
-                    var newFunctionTableEntry = new InvertedFunctionTableEntry32((int) rotatedAddress, DllBaseAddress.ToInt32(), _peImage.Headers.PEHeader!.SizeOfImage, exceptionTable.HandlerCount);
+                    functionTableEntryArray[insertionIndex] = new InvertedFunctionTableEntry32((int) rotatedAddress, DllBaseAddress.ToInt32(), _peImage.Headers.PEHeader!.SizeOfImage, exceptionTable.HandlerCount);
 
-                    newFunctionTableEntryArray[insertionIndex] = newFunctionTableEntry;
-
-                    // Update the existing function table array
-
-                    _processContext.Process.WriteArray(functionTableEntryArrayAddress, newFunctionTableEntryArray.AsSpan());
-
-                    // Update the function table
-
-                    var overflow = functionTable.Count + 1 == functionTable.MaxCount ? 1 : 0;
-
-                    var newFunctionTable = new InvertedFunctionTable(functionTable.Count + 1, functionTable.MaxCount, overflow);
-
-                    try
-                    {
-                        _processContext.Process.WriteStructure(functionTableAddress, newFunctionTable);
-                    }
-
-                    catch
-                    {
-                        _processContext.Process.WriteArray(functionTableEntryArrayAddress, functionTableEntryArray);
-
-                        throw;
-                    }
+                    _processContext.Memory.WriteSpan(functionTableEntryArrayAddress, functionTableEntryArray);
                 }
 
                 else
@@ -453,19 +403,15 @@ namespace Lunar
 
                     var functionTableEntryArrayAddress = functionTableAddress + Unsafe.SizeOf<InvertedFunctionTable>();
 
-                    var functionTableEntryArray = _processContext.Process.ReadArray<InvertedFunctionTableEntry64>(functionTableEntryArrayAddress, Constants.InvertedFunctionTableSize);
+                    var functionTableEntryArray = _processContext.Memory.ReadSpan<InvertedFunctionTableEntry64>(functionTableEntryArrayAddress, Constants.InvertedFunctionTableSize);
 
-                    // Initialise a new function table entry array
-
-                    var newFunctionTableEntryArray = functionTableEntryArray.ToArray();
-
-                    // Determine where the new function table entry should be inserted
+                    // Determine the index where the entry for the DLL should be inserted
 
                     var insertionIndex = 1;
 
                     while (insertionIndex < functionTable.Count)
                     {
-                        if ((ulong) DllBaseAddress.ToInt64() < (ulong) newFunctionTableEntryArray[insertionIndex].ImageBase)
+                        if ((ulong) DllBaseAddress.ToInt64() < (ulong) functionTableEntryArray[insertionIndex].ImageBase)
                         {
                             break;
                         }
@@ -475,44 +421,30 @@ namespace Lunar
 
                     if (insertionIndex < functionTable.Count)
                     {
-                        // Shift the existing elements to make space for the new function table entry
+                        // Shift the existing elements to make space for the entry for the DLL
 
                         for (var entryIndex = functionTable.Count - 1; entryIndex >= insertionIndex; entryIndex -= 1)
                         {
-                            newFunctionTableEntryArray[entryIndex + 1] = newFunctionTableEntryArray[entryIndex];
+                            functionTableEntryArray[entryIndex + 1] = functionTableEntryArray[entryIndex];
                         }
                     }
 
-                    // Initialise a new function table entry for the DLL
+                    // Update the function table entry array
 
                     var exceptionDirectoryAddress = DllBaseAddress + _peImage.Headers.PEHeader!.ExceptionTableDirectory.RelativeVirtualAddress;
 
-                    var newFunctionTableEntry = new InvertedFunctionTableEntry64(exceptionDirectoryAddress.ToInt64(), DllBaseAddress.ToInt64(), _peImage.Headers.PEHeader!.SizeOfImage, _peImage.Headers.PEHeader!.ExceptionTableDirectory.Size);
+                    functionTableEntryArray[insertionIndex] = new InvertedFunctionTableEntry64(exceptionDirectoryAddress.ToInt64(), DllBaseAddress.ToInt64(), _peImage.Headers.PEHeader!.SizeOfImage, _peImage.Headers.PEHeader!.ExceptionTableDirectory.Size);
 
-                    newFunctionTableEntryArray[insertionIndex] = newFunctionTableEntry;
-
-                    // Update the existing function table array
-
-                    _processContext.Process.WriteArray(functionTableEntryArrayAddress, newFunctionTableEntryArray.AsSpan());
-
-                    // Update the function table
-
-                    var overflow = functionTable.Count + 1 == functionTable.MaxCount ? 1 : 0;
-
-                    var newFunctionTable = new InvertedFunctionTable(functionTable.Count + 1, functionTable.MaxCount, overflow);
-
-                    try
-                    {
-                        _processContext.Process.WriteStructure(functionTableAddress, newFunctionTable);
-                    }
-
-                    catch
-                    {
-                        _processContext.Process.WriteArray(functionTableEntryArrayAddress, functionTableEntryArray);
-
-                        throw;
-                    }
+                    _processContext.Memory.WriteSpan(functionTableEntryArrayAddress, functionTableEntryArray);
                 }
+
+                // Update the function table
+
+                var overflow = functionTable.Count + 1 == functionTable.MaxCount ? 1 : 0;
+
+                functionTable = new InvertedFunctionTable(functionTable.Count + 1, functionTable.MaxCount, overflow);
+
+                _processContext.Memory.WriteStructure(functionTableAddress, functionTable);
             }
 
             finally
@@ -536,11 +468,11 @@ namespace Lunar
                     throw new FileNotFoundException($"Failed to resolve the file path of the dependency {dependency.Name}");
                 }
 
-                var dependencyFilePathAddress = _processContext.Process.AllocateMemory(Encoding.Unicode.GetByteCount(dependencyFilePath));
+                var dependencyFilePathAddress = _processContext.Memory.AllocateBuffer(Encoding.Unicode.GetByteCount(dependencyFilePath), ProtectionType.ReadOnly);
 
                 try
                 {
-                    _processContext.Process.WriteString(dependencyFilePathAddress, dependencyFilePath);
+                    _processContext.Memory.WriteString(dependencyFilePathAddress, dependencyFilePath);
 
                     // Load the dependency using the Windows loader
 
@@ -556,7 +488,7 @@ namespace Lunar
 
                 finally
                 {
-                    _processContext.Process.FreeMemory(dependencyFilePathAddress);
+                    _processContext.Memory.FreeBuffer(dependencyFilePathAddress);
                 }
             }
         }
@@ -565,11 +497,9 @@ namespace Lunar
         {
             // Map the headers
 
-            var headerBytes = _dllBytes.Span.Slice(0, _peImage.Headers.PEHeader!.SizeOfHeaders);
+            var headerBytes = _dllBytes.Span[.._peImage.Headers.PEHeader!.SizeOfHeaders];
 
-            _processContext.Process.WriteArray(DllBaseAddress, headerBytes);
-
-            _processContext.Process.ProtectMemory(DllBaseAddress, headerBytes.Length, ProtectionType.ReadOnly);
+            _processContext.Memory.WriteSpan(DllBaseAddress, headerBytes);
         }
 
         private void MapSections()
@@ -587,7 +517,7 @@ namespace Lunar
 
                 var sectionBytes = _dllBytes.Span.Slice(section.PointerToRawData, section.SizeOfRawData);
 
-                _processContext.Process.WriteArray(sectionAddress, sectionBytes);
+                _processContext.Memory.WriteSpan(sectionAddress, sectionBytes);
 
                 // Determine the protection to apply to the section
 
@@ -621,53 +551,52 @@ namespace Lunar
                     sectionProtection |= ProtectionType.NoCache;
                 }
 
-                _processContext.Process.ProtectMemory(sectionAddress, section.SizeOfRawData, sectionProtection);
+                _processContext.Memory.ProtectBuffer(sectionAddress, section.SizeOfRawData, sectionProtection);
             }
         }
 
         private void RelocateImage()
         {
-            if (_processContext.Process.GetArchitecture() == Architecture.X86)
+            Parallel.ForEach(_peImage.RelocationDirectory.GetRelocations(), relocation =>
             {
-                // Calculate the delta from the preferred base address
-
-                var delta = (uint) DllBaseAddress.ToInt32() - (uint) _peImage.Headers.PEHeader!.ImageBase;
-
-                Parallel.ForEach(_peImage.RelocationDirectory.GetRelocations(), relocation =>
+                switch (relocation.Type)
                 {
-                    if (relocation.Type != RelocationType.HighLow)
+                    case RelocationType.Dir64:
+                    {
+                        // Calculate the delta from the preferred base address
+
+                        var delta = (ulong) DllBaseAddress.ToInt64() - _peImage.Headers.PEHeader!.ImageBase;
+
+                        // Perform the relocation
+
+                        var relocationValue = MemoryMarshal.Read<ulong>(_dllBytes.Span[relocation.Offset..]) + delta;
+
+                        MemoryMarshal.Write(_dllBytes.Span[relocation.Offset..], ref relocationValue);
+
+                        break;
+                    }
+
+                    case RelocationType.HighLow:
+                    {
+                        // Calculate the delta from the preferred base address
+
+                        var delta = (uint) DllBaseAddress.ToInt32() - (uint) _peImage.Headers.PEHeader!.ImageBase;
+
+                        // Perform the relocation
+
+                        var relocationValue = MemoryMarshal.Read<uint>(_dllBytes.Span[relocation.Offset..]) + delta;
+
+                        MemoryMarshal.Write(_dllBytes.Span[relocation.Offset..], ref relocationValue);
+
+                        break;
+                    }
+
+                    default:
                     {
                         return;
                     }
-
-                    // Perform the relocation
-
-                    var relocationValue = MemoryMarshal.Read<uint>(_dllBytes.Span.Slice(relocation.Offset)) + delta;
-
-                    MemoryMarshal.Write(_dllBytes.Span.Slice(relocation.Offset), ref relocationValue);
-                });
-            }
-
-            else
-            {
-                // Calculate the delta from the preferred base address
-
-                var delta = (ulong) DllBaseAddress.ToInt64() - _peImage.Headers.PEHeader!.ImageBase;
-
-                Parallel.ForEach(_peImage.RelocationDirectory.GetRelocations(), relocation =>
-                {
-                    if (relocation.Type != RelocationType.Dir64)
-                    {
-                        return;
-                    }
-
-                    // Perform the relocation
-
-                    var relocationValue = MemoryMarshal.Read<ulong>(_dllBytes.Span.Slice(relocation.Offset)) + delta;
-
-                    MemoryMarshal.Write(_dllBytes.Span.Slice(relocation.Offset), ref relocationValue);
-                });
-            }
+                }
+            });
         }
 
         private void RemoveExceptionHandlers()
@@ -680,7 +609,7 @@ namespace Lunar
 
                 var functionTableAddress = _processContext.GetNtdllSymbolAddress("LdrpInvertedFunctionTable");
 
-                var functionTable = _processContext.Process.ReadStructure<InvertedFunctionTable>(functionTableAddress);
+                var functionTable = _processContext.Memory.ReadStructure<InvertedFunctionTable>(functionTableAddress);
 
                 if (_processContext.Process.GetArchitecture() == Architecture.X86)
                 {
@@ -695,19 +624,15 @@ namespace Lunar
 
                     var functionTableEntryArrayAddress = functionTableAddress + Unsafe.SizeOf<InvertedFunctionTable>();
 
-                    var functionTableEntryArray = _processContext.Process.ReadArray<InvertedFunctionTableEntry32>(functionTableEntryArrayAddress, Constants.InvertedFunctionTableSize);
+                    var functionTableEntryArray = _processContext.Memory.ReadSpan<InvertedFunctionTableEntry32>(functionTableEntryArrayAddress, Constants.InvertedFunctionTableSize);
 
-                    // Initialise a new function table entry array
-
-                    var newFunctionTableEntryArray = functionTableEntryArray.ToArray();
-
-                    // Determine where the function table entry should be removed
+                    // Determine the index where the entry for the DLL should be removed
 
                     var removalIndex = 1;
 
                     while (removalIndex < functionTable.Count)
                     {
-                        if ((uint) DllBaseAddress.ToInt32() == (uint) newFunctionTableEntryArray[removalIndex].ImageBase)
+                        if (DllBaseAddress.ToInt32() == functionTableEntryArray[removalIndex].ImageBase)
                         {
                             break;
                         }
@@ -717,38 +642,22 @@ namespace Lunar
 
                     if (removalIndex < functionTable.Count - 1)
                     {
-                        // Shift the existing elements to overwrite the function table entry
+                        // Shift the existing elements to overwrite the entry for the DLL
 
                         for (var entryIndex = removalIndex; entryIndex < functionTable.Count; entryIndex += 1)
                         {
-                            newFunctionTableEntryArray[entryIndex] = newFunctionTableEntryArray[entryIndex + 1];
+                            functionTableEntryArray[entryIndex] = functionTableEntryArray[entryIndex + 1];
                         }
                     }
 
                     else
                     {
-                        newFunctionTableEntryArray[removalIndex] = default;
+                        functionTableEntryArray[removalIndex] = default;
                     }
 
-                    // Update the existing function table array
+                    // Update the function table entry array
 
-                    _processContext.Process.WriteArray(functionTableEntryArrayAddress, newFunctionTableEntryArray.AsSpan());
-
-                    // Update the function table
-
-                    var newFunctionTable = new InvertedFunctionTable(functionTable.Count - 1, functionTable.MaxCount, 0);
-
-                    try
-                    {
-                        _processContext.Process.WriteStructure(functionTableAddress, newFunctionTable);
-                    }
-
-                    catch
-                    {
-                        _processContext.Process.WriteArray(functionTableEntryArrayAddress, functionTableEntryArray);
-
-                        throw;
-                    }
+                    _processContext.Memory.WriteSpan(functionTableEntryArrayAddress, functionTableEntryArray);
                 }
 
                 else
@@ -757,19 +666,15 @@ namespace Lunar
 
                     var functionTableEntryArrayAddress = functionTableAddress + Unsafe.SizeOf<InvertedFunctionTable>();
 
-                    var functionTableEntryArray = _processContext.Process.ReadArray<InvertedFunctionTableEntry64>(functionTableEntryArrayAddress, Constants.InvertedFunctionTableSize);
+                    var functionTableEntryArray = _processContext.Memory.ReadSpan<InvertedFunctionTableEntry64>(functionTableEntryArrayAddress, Constants.InvertedFunctionTableSize);
 
-                    // Initialise a new function table entry array
-
-                    var newFunctionTableEntryArray = functionTableEntryArray.ToArray();
-
-                    // Determine where the function table entry should be removed
+                    // Determine the index where the entry for the DLL should be removed
 
                     var removalIndex = 1;
 
                     while (removalIndex < functionTable.Count)
                     {
-                        if ((ulong) DllBaseAddress.ToInt64() == (ulong) newFunctionTableEntryArray[removalIndex].ImageBase)
+                        if (DllBaseAddress.ToInt64() == functionTableEntryArray[removalIndex].ImageBase)
                         {
                             break;
                         }
@@ -779,39 +684,29 @@ namespace Lunar
 
                     if (removalIndex < functionTable.Count - 1)
                     {
-                        // Shift the existing elements to overwrite the function table entry
+                        // Shift the existing elements to overwrite the entry for the DLL
 
                         for (var entryIndex = removalIndex; entryIndex < functionTable.Count; entryIndex += 1)
                         {
-                            newFunctionTableEntryArray[entryIndex] = newFunctionTableEntryArray[entryIndex + 1];
+                            functionTableEntryArray[entryIndex] = functionTableEntryArray[entryIndex + 1];
                         }
                     }
 
                     else
                     {
-                        newFunctionTableEntryArray[removalIndex] = default;
+                        functionTableEntryArray[removalIndex] = default;
                     }
 
-                    // Update the existing function table array
+                    // Update the function table entry array
 
-                    _processContext.Process.WriteArray(functionTableEntryArrayAddress, newFunctionTableEntryArray.AsSpan());
-
-                    // Update the function table
-
-                    var newFunctionTable = new InvertedFunctionTable(functionTable.Count - 1, functionTable.MaxCount, 0);
-
-                    try
-                    {
-                        _processContext.Process.WriteStructure(functionTableAddress, newFunctionTable);
-                    }
-
-                    catch
-                    {
-                        _processContext.Process.WriteArray(functionTableEntryArrayAddress, functionTableEntryArray);
-
-                        throw;
-                    }
+                    _processContext.Memory.WriteSpan(functionTableEntryArrayAddress, functionTableEntryArray);
                 }
+
+                // Update the function table
+
+                functionTable = new InvertedFunctionTable(functionTable.Count - 1, functionTable.MaxCount, 0);
+
+                _processContext.Memory.WriteStructure(functionTableAddress, functionTable);
             }
 
             finally
