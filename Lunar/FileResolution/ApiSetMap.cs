@@ -1,100 +1,139 @@
-﻿using System;
-using System.Linq;
-using System.Runtime.CompilerServices;
+﻿using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using Lunar.Native.PInvoke;
 using Lunar.Native.Structs;
 using Lunar.Utilities;
 
-namespace Lunar.FileResolution
+namespace Lunar.FileResolution;
+
+internal sealed class ApiSetMap
 {
-    internal sealed class ApiSetMap
+    private readonly IntPtr _apiSetMapAddress;
+
+    internal ApiSetMap()
     {
-        private readonly IntPtr _apiSetMapAddress;
+        _apiSetMapAddress = GetApiSetMapAddress();
+    }
 
-        internal ApiSetMap()
+    internal string? ResolveApiSetName(string apiSetName, string? parentName)
+    {
+        // Read the namespace of the API set
+
+        var @namespace = Marshal.PtrToStructure<ApiSetNamespace>(_apiSetMapAddress);
+
+        // Create a hash for the API set name, skipping the patch number and suffix
+
+        var charactersToHash = apiSetName[..apiSetName.LastIndexOf("-", StringComparison.Ordinal)];
+        var apiSetNameHash = charactersToHash.Aggregate(0, (currentHash, character) => currentHash * @namespace.HashFactor + char.ToLower(character));
+
+        // Search the namespace for the corresponding hash entry
+
+        var low = 0;
+        var high = @namespace.Count - 1;
+
+        while (low <= high)
         {
-            _apiSetMapAddress = GetNativeAddress();
-        }
+            var middle = (low + high) / 2;
 
-        internal string? ResolveApiSetName(string apiSetName)
-        {
-            // Read the namespace of the API set
+            // Read the hash entry
 
-            var @namespace = Marshal.PtrToStructure<ApiSetNamespace>(_apiSetMapAddress);
+            var hashEntryAddress = _apiSetMapAddress + @namespace.HashOffset + Unsafe.SizeOf<ApiSetHashEntry>() * middle;
+            var hashEntry = Marshal.PtrToStructure<ApiSetHashEntry>(hashEntryAddress);
 
-            // Create a hash for the API set name, skipping the patch number and suffix
-
-            var charactersToHash = apiSetName[..apiSetName.LastIndexOf("-", StringComparison.Ordinal)];
-            var apiSetNameHash = charactersToHash.Aggregate(0, (currentHash, character) => currentHash * @namespace.HashFactor + char.ToLower(character));
-
-            // Search the namespace for the corresponding hash entry
-
-            var low = 0;
-            var high = @namespace.Count - 1;
-
-            while (low <= high)
+            if (apiSetNameHash == hashEntry.Hash)
             {
-                var middle = (low + high) / 2;
+                // Read the namespace entry
 
-                // Read the hash entry
+                var namespaceEntryAddress = _apiSetMapAddress + @namespace.EntryOffset + Unsafe.SizeOf<ApiSetNamespaceEntry>() * hashEntry.Index;
+                var namespaceEntry = Marshal.PtrToStructure<ApiSetNamespaceEntry>(namespaceEntryAddress);
 
-                var hashEntryAddress = _apiSetMapAddress + @namespace.HashOffset + Unsafe.SizeOf<ApiSetHashEntry>() * middle;
-                var hashEntry = Marshal.PtrToStructure<ApiSetHashEntry>(hashEntryAddress);
+                // Read the namespace entry name
 
-                if (apiSetNameHash == hashEntry.Hash)
+                var namespaceEntryNameAddress = _apiSetMapAddress + namespaceEntry.NameOffset;
+                var namespaceEntryName = Marshal.PtrToStringUni(namespaceEntryNameAddress, namespaceEntry.NameLength / sizeof(char));
+
+                // Ensure the correct hash bucket is being used
+
+                if (!charactersToHash.Equals(namespaceEntryName[..namespaceEntryName.LastIndexOf("-", StringComparison.Ordinal)]))
                 {
-                    // Read the namespace entry
+                    break;
+                }
 
-                    var namespaceEntryAddress = _apiSetMapAddress + @namespace.EntryOffset + Unsafe.SizeOf<ApiSetNamespaceEntry>() * hashEntry.Index;
-                    var namespaceEntry = Marshal.PtrToStructure<ApiSetNamespaceEntry>(namespaceEntryAddress);
+                // Read the default value entry
 
-                    // Read the first value entry that the namespace entry maps to
+                var valueEntryAddress = _apiSetMapAddress + namespaceEntry.ValueOffset;
+                var valueEntry = Marshal.PtrToStructure<ApiSetValueEntry>(valueEntryAddress);
 
-                    var valueEntryAddress = _apiSetMapAddress + namespaceEntry.ValueOffset;
-                    var valueEntry = Marshal.PtrToStructure<ApiSetValueEntry>(valueEntryAddress);
+                // Read the default value entry name
 
-                    // Read the value entry name
+                var valueEntryNameAddress = _apiSetMapAddress + valueEntry.ValueOffset;
+                var valueEntryName = Marshal.PtrToStringUni(valueEntryNameAddress, valueEntry.ValueCount / sizeof(char));
 
-                    var valueEntryNameAddress = _apiSetMapAddress + valueEntry.ValueOffset;
-                    var valueEntryName = Marshal.PtrToStringUni(valueEntryNameAddress, valueEntry.ValueCount / sizeof(char));
-
+                if (parentName is null || valueEntry.ValueCount == 1)
+                {
                     return valueEntryName;
                 }
 
-                // Adjust high/low according to binary search rules
+                // Search for an alternative host using the parent
 
-                if ((uint) apiSetNameHash < (uint) hashEntry.Hash)
+                for (var valueEntryIndex = namespaceEntry.ValueCount - 1; valueEntryIndex >= 0; valueEntryIndex -= 1)
                 {
-                    high = middle - 1;
+                    // Read the value entry
+
+                    valueEntryAddress = _apiSetMapAddress + namespaceEntry.ValueOffset + Unsafe.SizeOf<ApiSetValueEntry>() * valueEntryIndex;
+                    valueEntry = Marshal.PtrToStructure<ApiSetValueEntry>(valueEntryAddress);
+
+                    // Read the value entry alias name
+
+                    var valueEntryAliasNameAddress = _apiSetMapAddress + valueEntry.NameOffset;
+                    var valueEntryAliasName = Marshal.PtrToStringUni(valueEntryAliasNameAddress, valueEntry.NameLength / sizeof(char));
+
+                    if (parentName.Equals(valueEntryAliasName, StringComparison.OrdinalIgnoreCase))
+                    {
+                        // Read the value entry name
+
+                        valueEntryNameAddress = _apiSetMapAddress + valueEntry.ValueOffset;
+                        valueEntryName = Marshal.PtrToStringUni(valueEntryNameAddress, valueEntry.ValueCount / sizeof(char));
+
+                        break;
+                    }
                 }
 
-                else
-                {
-                    low = middle + 1;
-                }
+                return valueEntryName;
             }
 
-            return null;
-        }
+            // Adjust high/low according to binary search rules
 
-        private static IntPtr GetNativeAddress()
-        {
-            var pebAddress = Ntdll.RtlGetCurrentPeb();
-
-            if (Environment.Is64BitProcess)
+            if ((uint) apiSetNameHash < (uint) hashEntry.Hash)
             {
-                var peb = Marshal.PtrToStructure<Peb64>(pebAddress);
-
-                return UnsafeHelpers.WrapPointer(peb.ApiSetMap);
+                high = middle - 1;
             }
 
             else
             {
-                var peb = Marshal.PtrToStructure<Peb32>(pebAddress);
-
-                return UnsafeHelpers.WrapPointer(peb.ApiSetMap);
+                low = middle + 1;
             }
+        }
+
+        return null;
+    }
+
+    private static IntPtr GetApiSetMapAddress()
+    {
+        var pebAddress = Ntdll.RtlGetCurrentPeb();
+
+        if (Environment.Is64BitProcess)
+        {
+            var peb = Marshal.PtrToStructure<Peb64>(pebAddress);
+
+            return UnsafeHelpers.WrapPointer(peb.ApiSetMap);
+        }
+
+        else
+        {
+            var peb = Marshal.PtrToStructure<Peb32>(pebAddress);
+
+            return UnsafeHelpers.WrapPointer(peb.ApiSetMap);
         }
     }
 }

@@ -1,13 +1,6 @@
 ﻿using System.Runtime.InteropServices;
 
-namespace Lunar.Native.Structs
-{
-    [StructLayout(LayoutKind.Explicit, Size = 16)]
-    internal readonly struct ImageResourceDataEntry
-    {
-        [FieldOffset(0x0)]
-        internal readonly int OffsetToData;
-        [FieldOffset(0x4)]
-        internal readonly int Size;
-    }
-}
+namespace Lunar.Native.Structs;
+
+[StructLayout(LayoutKind.Explicit, Size = 16)]
+internal readonly record struct ImageResourceDataEntry([field: FieldOffset(0x0)] int OffsetToData, [field: FieldOffset(0x4)] int Size);

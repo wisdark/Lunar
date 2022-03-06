@@ -1,34 +1,9 @@
 ﻿using System.Runtime.InteropServices;
 
-namespace Lunar.Native.Structs
-{
-    [StructLayout(LayoutKind.Explicit, Size = 8)]
-    internal readonly struct RtlBitmap32
-    {
-        [FieldOffset(0x0)]
-        internal readonly int SizeOfBitmap;
-        [FieldOffset(0x4)]
-        internal readonly int Buffer;
+namespace Lunar.Native.Structs;
 
-        internal RtlBitmap32(int sizeOfBitmap, int buffer)
-        {
-            SizeOfBitmap = sizeOfBitmap;
-            Buffer = buffer;
-        }
-    }
+[StructLayout(LayoutKind.Explicit, Size = 8)]
+internal readonly record struct RtlBitmap32([field: FieldOffset(0x0)] int SizeOfBitmap, [field: FieldOffset(0x4)] int Buffer);
 
-    [StructLayout(LayoutKind.Explicit, Size = 16)]
-    internal readonly struct RtlBitmap64
-    {
-        [FieldOffset(0x0)]
-        internal readonly int SizeOfBitmap;
-        [FieldOffset(0x8)]
-        internal readonly long Buffer;
-
-        internal RtlBitmap64(int sizeOfBitmap, long buffer)
-        {
-            SizeOfBitmap = sizeOfBitmap;
-            Buffer = buffer;
-        }
-    }
-}
+[StructLayout(LayoutKind.Explicit, Size = 16)]
+internal readonly record struct RtlBitmap64([field: FieldOffset(0x0)] int SizeOfBitmap, [field: FieldOffset(0x8)] long Buffer);

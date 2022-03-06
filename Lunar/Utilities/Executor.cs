@@ -1,20 +1,17 @@
-﻿using System;
+﻿namespace Lunar.Utilities;
 
-namespace Lunar.Utilities
+internal static class Executor
 {
-    internal static class Executor
+    internal static void IgnoreExceptions(Action operation)
     {
-        internal static void IgnoreExceptions(Action operation)
+        try
         {
-            try
-            {
-                operation.Invoke();
-            }
+            operation.Invoke();
+        }
 
-            catch
-            {
-                // Ignore
-            }
+        catch
+        {
+            // Ignore
         }
     }
 }
