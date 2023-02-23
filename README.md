@@ -1,7 +1,5 @@
 ## Lunar
 
-![](https://github.com/Dewera/Lunar/workflows/Continuous%20Integration/badge.svg)
-
 A lightweight native DLL mapping library that supports mapping directly from memory
 
 ---
@@ -66,7 +64,7 @@ public LibraryMapper(Process, string, MappingFlags);
 The base address of the DLL in the process
 
 ```c#
-public IntPtr DllBaseAddress { get; }
+public nint DllBaseAddress { get; }
 ```
 
 ### Methods
@@ -111,5 +109,5 @@ MappingsFlags.DiscardHeaders
 Specifies that the entry point of any TLS callbacks and the DLL should not be called
 
 ```c#
-MappingsFlags.SkipInitialisationRoutines
+MappingsFlags.SkipInitRoutines
 ```
